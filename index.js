@@ -7,6 +7,10 @@ app.get("/", (req, res) => {
   console.log("on the runn");
 });
 
+app.get("/", (req, res) => {
+  res.render("running well too");
+});
+
 app.listen(1234, () => {
   console.log("server running");
 });
