@@ -1,87 +1,145 @@
 import { Router } from "express";
-import Users from "../models/user.js";
+import User from "../models/user.js";
 import { verifyToken, isAgent, isBuyer } from "../middleware/verifytoken.js";
+import { upload } from "../middleware/upload.js";
+import { sendOtpEmail } from "../utility/mailer.js";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 const router = Router();
 
 
-const JWT_SECRET = process.env.JWT_SECRET;
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN 
+const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
 
-
-// Signup route
+// Signup Route
 router.post("/signup", async (req, res) => {
-    console.log("Received data:", req.body);
-
   try {
-    const { name, email, password, confirmPassword } = req.body;
+    const { name, email, password, confirmPassword, role } = req.body;
+
+    if (!name || !email || !password || !confirmPassword) {
+      return res.status(400).json({ error: "All fields are required" });
+    }
 
     if (password !== confirmPassword) {
       return res.status(400).json({ error: "Passwords do not match" });
     }
 
-    const existingUser = await Users.findOne({ email: data.email });
+    const existingUser = await User.findOne({ email });
     if (existingUser) {
-      console.log(" User already exists:", existingUser);
-      return res.status(400).send("User already exists. Please use a different email.");
+      return res.status(400).json({ error: "User already exists" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    const otp = generateOtp();
 
-    const data = {
+    const newUser = new User({
       name,
       email,
       password: hashedPassword,
-      role: role || "buyer"
-    };
+      role,
+      otp,
+      otpExpires: Date.now() + 10 * 60 * 1000,
+    });
 
+    await newUser.save();
 
-    res.status(201).json({ message: "Signup successful!", user: newUser });
+    await sendOtpEmail(email, otp);
 
+    const token = jwt.sign(
+      { id: newUser._id, role: newUser.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN }
+    );
+
+    res.status(201).json({
+      message: "Signup successful. Please verify your account with the OTP sent to your email.",
+      token,
+    });
   } catch (err) {
-    console.error("Signup error:", err);
-    res.status(500).send("Error signing up.");
+    console.error("Signup error:", err.message);
+    res.status(500).json({ error: "Signup error", details: err.message });
   }
-
 });
 
-
-// Login route
-router.get("/login", async (req, res) => {
+// Login Route
+router.post("/login", async (req, res) => {
   try {
-
     const { email, password } = req.body;
 
-    const user = await Users.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ error: "User not found." });
-    }
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ error: "Invalid email or password" });
 
-    const isPasswordMatch = await bcrypt.compare(password, user.password);
-    if (!isPasswordMatch) {
-      return res.status(400).json({ error: "Wrong password." });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(400).json({ error: "Invalid email or password" });
 
+    if (!user.isVerified) {
+      return res.status(403).json({ error: "User not verified. Please complete verification." });
     }
 
     const token = jwt.sign(
       { id: user._id, role: user.role },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );    
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN }
+    );
 
-    res.json({
-      message: "Login successful!",
-      token,
-      role: user.role
-    });    
-
+    res.json({ message: "Login successful", token });
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Login error.");
+    console.error("Login error:", err.message);
+    res.status(500).json({ error: "Login error", details: err.message });
   }
-
 });
+
+
+// verification route
+router.post(
+  "/verify",
+  verifyToken,
+  (req, res, next) => {
+    upload.single("document")(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message });
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      const { nationalId, phone, otp } = req.body;
+
+      const user = await User.findById(req.user.id);
+      if (!user) return res.status(400).json({ error: "User not found" });
+
+      if (user.isVerified) {
+        return res.status(400).json({ error: "User already verified" });
+      }
+
+      if (user.otp !== otp || user.otpExpires < Date.now()) {
+        return res.status(400).json({ error: "Invalid or expired OTP" });
+      }
+
+      user.isVerified = true;
+      user.otp = null;
+      user.otpExpires = null;
+      user.phone = phone || user.phone;
+      user.nationalId = nationalId || user.nationalId;
+
+    if (user.role === "agent") {
+      if (!req.file) {
+        return res.status(400).json({ error: "Document upload required for agents" });
+      }
+      user.nationalId = nationalId;
+      user.phone = phone;
+      user.document = req.file.path;
+    } else if (user.role === "buyer") {
+      user.phone = phone;
+    }
+
+      await user.save();
+
+      return res.json({ message: "Verification successful" });
+    } catch (err) {
+      console.error("Verification error:", err);
+      return res.status(500).json({ error: "Verification failed" });
+    }
+  }
+);
 
 
 // Protected route (only logged-in users)

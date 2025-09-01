@@ -4,6 +4,9 @@ import { fileURLToPath } from "url";
 import { dirname } from "path";
 import User from "./routes/user.route.js";
 import connectDB from "./db/db.js";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -17,6 +20,9 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(express.static(__dirname));
 app.use("/user", User);
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+
 
 
 app.get("/signup", (req, res) => {
